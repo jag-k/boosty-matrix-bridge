@@ -1,0 +1,8 @@
+.tmp/
+logs/
+/mautrix-boosty
+
+*.yml
+*.yaml
+!pkg/connector/example-config.yaml
+!.github/**/*

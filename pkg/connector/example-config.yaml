@@ -1,0 +1,6 @@
+# Displayname template for Boosty users
+# Available variables: .Name
+displayname_template: "{{.Name}}"
+
+# How often to poll Boosty for new messages (in seconds)
+poll_interval: 30
