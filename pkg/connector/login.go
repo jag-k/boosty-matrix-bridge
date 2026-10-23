@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strconv"
 	"time"
 
@@ -98,7 +99,7 @@ func (c *CookieJSONLogin) SubmitUserInput(ctx context.Context, input map[string]
 	}
 
 	var auth AuthCookie
-	if err := json.Unmarshal([]byte(authJSON), &auth); err != nil {
+	if err := unmarshalAuthCookie(authJSON, &auth); err != nil {
 		return nil, fmt.Errorf("failed to parse auth JSON: %w", err)
 	}
 
@@ -218,7 +219,7 @@ func (c *CookieLogin) SubmitCookies(ctx context.Context, cookies map[string]stri
 	}
 
 	var auth AuthCookie
-	if err := json.Unmarshal([]byte(authCookie), &auth); err != nil {
+	if err := unmarshalAuthCookie(authCookie, &auth); err != nil {
 		return nil, fmt.Errorf("failed to parse auth cookie: %w", err)
 	}
 
@@ -274,4 +275,17 @@ func (c *CookieLogin) SubmitCookies(ctx context.Context, cookies map[string]stri
 		Instructions:   fmt.Sprintf("Successfully logged in as %s", remoteName),
 		CompleteParams: &bridgev2.LoginCompleteParams{UserLoginID: ul.ID, UserLogin: ul},
 	}, nil
+}
+
+// Cookie values copied from DevTools may be percent-encoded. Preserve literal
+// plus signs in tokens: cookies use percent encoding, not form encoding.
+func unmarshalAuthCookie(raw string, out any) error {
+	if json.Valid([]byte(raw)) {
+		return json.Unmarshal([]byte(raw), out)
+	}
+	decoded, err := url.PathUnescape(raw)
+	if err != nil {
+		return fmt.Errorf("invalid cookie encoding")
+	}
+	return json.Unmarshal([]byte(decoded), out)
 }

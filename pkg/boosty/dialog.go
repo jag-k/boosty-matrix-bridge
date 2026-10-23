@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 )
 
 // GetDialogs fetches the list of dialogs (paginated).
@@ -25,7 +26,26 @@ func (c *Client) GetDialog(ctx context.Context, dialogID string) (*DialogDetailR
 	if err := c.doJSON(ctx, http.MethodGet, path, nil, "", &resp); err != nil {
 		return nil, err
 	}
+
+	signMessageMedia(resp.Messages.Data, resp.SignedQuery)
 	return &resp, nil
+}
+
+func signMessageMedia(messages []Message, signedQuery string) {
+	// File and audio URLs need the dialog-level signature; images are already signed.
+	for i := range messages {
+		for j := range messages[i].Data {
+			block := &messages[i].Data[j]
+			if block.Type != ContentTypeFile && block.Type != ContentTypeAudio {
+				continue
+			}
+			u, err := url.Parse(block.URL)
+			if err == nil && u.Host != "" && u.RawQuery == "" && signedQuery != "" {
+				u.RawQuery = strings.TrimPrefix(signedQuery, "?")
+				block.URL = u.String()
+			}
+		}
+	}
 }
 
 // SendMessage sends a text message to a dialog.

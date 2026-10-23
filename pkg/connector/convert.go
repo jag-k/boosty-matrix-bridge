@@ -6,11 +6,13 @@ import (
 	"html"
 	"io"
 	"mime"
+	"net/url"
 	"path"
 	"strings"
 
 	"github.com/rs/zerolog"
 	"maunium.net/go/mautrix/bridgev2"
+	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/event"
 
 	"github.com/jag-k/boosty-matrix-bridge/pkg/boosty"
@@ -55,7 +57,7 @@ func (b *BoostyClient) convertToMatrix(ctx context.Context, portal *bridgev2.Por
 	}
 
 	// Convert each media block into a separate part
-	for _, block := range mediaBlocks {
+	for i, block := range mediaBlocks {
 		var part *bridgev2.ConvertedMessagePart
 		var err error
 
@@ -79,9 +81,15 @@ func (b *BoostyClient) convertToMatrix(ctx context.Context, portal *bridgev2.Por
 
 		if err != nil {
 			log.Err(err).Str("type", block.Type).Msg("Failed to convert media block")
-			continue
+
+			part = &bridgev2.ConvertedMessagePart{
+				Type: event.EventMessage,
+				Content: &event.MessageEventContent{MsgType: event.MsgNotice,
+					Body: fmt.Sprintf("[Boosty: unable to download %s attachment: %s]", block.Type, block.Title)},
+			}
 		}
 		if part != nil {
+			part.ID = networkid.PartID(fmt.Sprintf("media-%d", i))
 			cm.Parts = append(cm.Parts, part)
 		}
 	}
@@ -226,7 +234,7 @@ func (b *BoostyClient) convertOKVideoToMatrix(_ context.Context, block boosty.Co
 	}
 
 	body := fmt.Sprintf("[video: %s]", title)
-	htmlBody := body
+	htmlBody := html.EscapeString(body)
 	if bestURL != "" {
 		body = fmt.Sprintf("%s\n%s", title, bestURL)
 		htmlBody = fmt.Sprintf(`<a href="%s">🎬 %s</a>`, html.EscapeString(bestURL), html.EscapeString(title))
@@ -315,8 +323,12 @@ func (b *BoostyClient) downloadBoostyMedia(ctx context.Context, w io.Writer, med
 	}, nil
 }
 
-func guessMimeFromURL(url string) string {
-	ext := path.Ext(url)
+func guessMimeFromURL(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return "application/octet-stream"
+	}
+	ext := path.Ext(parsed.Path)
 	if ext == "" {
 		return "application/octet-stream"
 	}

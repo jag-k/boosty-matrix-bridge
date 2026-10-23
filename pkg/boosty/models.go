@@ -78,7 +78,16 @@ type DialogRelation struct {
 
 // MessageListData wraps a list of messages.
 type MessageListData struct {
-	Data []Message `json:"data"`
+	Data  []Message        `json:"data"`
+	Extra MessageListExtra `json:"extra"`
+}
+
+// MessageListExtra describes direction boundaries. On directional page requests,
+// IsLast means the end of the requested direction.
+type MessageListExtra struct {
+	IsFirst bool            `json:"isFirst"`
+	IsLast  bool            `json:"isLast"`
+	Offset  json.RawMessage `json:"offset"`
 }
 
 // Message is a single message in a dialog.

@@ -4,8 +4,10 @@ import (
 	"context"
 	"strconv"
 
+	"github.com/jag-k/boosty-matrix-bridge/pkg/boosty"
 	"github.com/rs/zerolog"
 	"maunium.net/go/mautrix/bridgev2"
+	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/networkid"
 )
 
@@ -21,13 +23,14 @@ func (b *BoostyClient) FetchMessages(ctx context.Context, params bridgev2.FetchM
 		return nil, err
 	}
 
-	// Boosty dialog API returns messages in the dialog detail response.
-	// We don't have cursor-based pagination yet, so we only support initial backfill.
-	if params.Cursor != "" {
-		return &bridgev2.FetchMessagesResponse{HasMore: false, Forward: params.Forward}, nil
+	anchor := ""
+	if params.AnchorMessage != nil {
+		anchor = string(params.AnchorMessage.ID)
 	}
-
-	detail, err := b.client.GetDialog(ctx, string(params.Portal.ID))
+	if !params.Forward && params.Cursor != "" {
+		anchor = string(params.Cursor)
+	}
+	detail, err := b.client.GetMessageHistory(ctx, string(params.Portal.ID), anchor, params.Forward, params.Count)
 	if err != nil {
 		return nil, err
 	}
@@ -38,12 +41,13 @@ func (b *BoostyClient) FetchMessages(ctx context.Context, params bridgev2.FetchM
 
 	resp := bridgev2.FetchMessagesResponse{
 		Forward: params.Forward,
-		HasMore: false, // no pagination support yet
+		HasMore: !detail.Messages.Extra.IsFirst,
+		Cursor:  networkid.PaginationCursor(strconv.Itoa(detail.Messages.Data[0].ID)),
 	}
 
 	chatmateID := networkid.UserID(strconv.Itoa(detail.Chatmate.ID))
 
-	for _, msg := range detail.Messages.Data {
+	for _, msg := range messagesInBackfillWindow(detail.Messages.Data, params.AnchorMessage, params.Forward) {
 		senderID := chatmateID
 		isFromMe := msg.AuthorID != detail.Chatmate.ID
 		if isFromMe {
@@ -79,4 +83,38 @@ func (b *BoostyClient) FetchMessages(ctx context.Context, params bridgev2.FetchM
 
 	log.Info().Int("count", len(resp.Messages)).Msg("Backfilled messages")
 	return &resp, nil
+}
+
+var _ bridgev2.BackfillingNetworkAPIWithLimits = (*BoostyClient)(nil)
+
+func (b *BoostyClient) GetBackfillMaxBatchCount(ctx context.Context, portal *bridgev2.Portal, task *database.BackfillTask) int {
+	// Boosty currently supports only one-to-one dialogs.
+	return b.main.Bridge.Config.Backfill.Queue.GetOverride("dm")
+}
+
+func messagesInBackfillWindow(messages []boosty.Message, anchor *database.Message, forward bool) []boosty.Message {
+	if anchor == nil {
+		return messages
+	}
+	for i, msg := range messages {
+		if strconv.Itoa(msg.ID) == string(anchor.ID) {
+			if forward {
+				return messages[i+1:]
+			}
+			return messages[:i]
+		}
+	}
+	// The anchor may no longer occur in the API's limited page. Do not re-send
+	// the whole page, or drop all newer messages just because it is absent.
+	var result []boosty.Message
+	anchorID, _ := strconv.Atoi(string(anchor.ID))
+	for _, msg := range messages {
+		ts := msg.CreatedAtTime()
+		newer := ts.After(anchor.Timestamp) || (ts.Equal(anchor.Timestamp) && msg.ID > anchorID)
+		older := ts.Before(anchor.Timestamp) || (ts.Equal(anchor.Timestamp) && msg.ID < anchorID)
+		if (forward && newer) || (!forward && older) {
+			result = append(result, msg)
+		}
+	}
+	return result
 }

@@ -6,3 +6,8 @@ logs/
 *.yaml
 !pkg/connector/example-config.yaml
 !.github/**/*
+
+# Local bridge credentials, encryption state and SQLite sidecars
+*.db
+*.db-wal
+*.db-shm

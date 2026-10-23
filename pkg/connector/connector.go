@@ -47,6 +47,9 @@ func (bc *BoostyConnector) GetName() bridgev2.BridgeName {
 }
 
 func (bc *BoostyConnector) LoadUserLogin(ctx context.Context, login *bridgev2.UserLogin) error {
+	if login.Client != nil {
+		login.Client.Disconnect()
+	}
 	login.Client = NewBoostyClient(ctx, bc, login)
 	return nil
 }

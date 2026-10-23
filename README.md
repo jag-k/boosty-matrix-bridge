@@ -5,10 +5,11 @@ A Matrix-Boosty DM puppeting bridge based on [mautrix-go bridgev2](https://githu
 ## Features
 
 - Bridge Boosty direct messages to Matrix
-- Email/password login
+- Browser cookie extraction or manual auth cookie JSON login
 - Text messages (send and receive)
+- Receive images, files, audio and stickers; video links
 - Read receipts
-- Message history backfill
+- Paginated message history and catch-up
 - Polling-based message sync
 
 ## Building
@@ -65,7 +66,7 @@ docker run -v /path/to/data:/data mautrix-boosty
 
 ## Login
 
-After the bridge is running, start a chat with the bridge bot and use the login command. You will be prompted for your Boosty email and password.
+After the bridge is running, start a chat with the bridge bot and use the login command. Choose browser cookie extraction or paste the `auth` cookie JSON from Boosty DevTools. Percent-encoded cookie values are accepted. The `_clientId` cookie can be supplied as the device ID. Access tokens refresh automatically on HTTP 401, and refreshed credentials are saved to the login database. If the refresh token is rejected or revoked, log in again.
 
 ## Network Configuration
 
@@ -79,3 +80,50 @@ network:
 
 - `displayname_template` - Go template for ghost display names
 - `poll_interval` - How often to poll Boosty for new messages (seconds)
+
+
+## History and attachments
+
+Enable `backfill.enabled` and `backfill.queue.enabled` in `config.yaml`.
+The connector uses `backfill.queue.max_batches_override.dm` for DM history,
+falling back to `backfill.queue.max_batches`. Zero disables queued history;
+`-1` allows all batches the connector can fetch. For example:
+
+```yaml
+backfill:
+  enabled: true
+  max_initial_messages: 50
+  max_catchup_messages: 500
+  queue:
+    enabled: true
+    batch_size: 50
+    batch_delay: 20
+    max_batches: 0
+    max_batches_override:
+      dm: -1
+```
+
+The bridge fetches older messages through Boosty's directional message API,
+using message IDs as cursors. Initial sync collects recent history up to
+`max_initial_messages`, the queue continues backwards, and catch-up drains all
+newer pages after the last known message. Pages are deduplicated and sorted
+oldest first. A stalled cursor is treated as an error rather than silently
+marking history complete.
+
+Incoming files and audio use the dialog's `signedQuery`; image URLs already carry
+their own signature. Failed attachment downloads produce a visible notice.
+Matrix-to-Boosty sending currently supports text only. Native Boosty video is
+represented by a stream link rather than an uploaded video file.
+
+If Boosty rejects the saved refresh token (`invalid_grant`), a fresh login is
+required. The bridge cannot obtain new credentials automatically after a revoked
+or otherwise invalid refresh token. Use the browser login flow or paste a fresh
+`auth` cookie along with the matching `_clientId`; do not paste credentials into
+logs or issue reports.
+
+If an older version logged `Event #... has same ID` followed by database insert
+errors, that Matrix batch was rejected. The framework may still have stored
+message mappings locally, so restarting the fixed bridge alone may not recover
+that batch. Preserve the database and logs before recovery; removing the entire
+database also removes login and encryption state. Repair must reconcile the
+failed batch's stored mappings with the events actually present on the server.

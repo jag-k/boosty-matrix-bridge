@@ -2,8 +2,10 @@ package connector
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -24,9 +26,11 @@ type BoostyClient struct {
 	userLogin *bridgev2.UserLogin
 	client    *boosty.Client
 
-	stopPolling context.CancelFunc
-	lastSeenMsg map[string]string // dialog ID -> last seen message ID
-	lastReadMsg map[string]string // dialog ID -> last read message ID (sent by us, read by chatmate)
+	stateLock     sync.Mutex
+	lifecycleLock sync.Mutex
+	stopPolling   context.CancelFunc
+	lastSeenMsg   map[string]string // dialog ID -> last seen message ID
+	lastReadMsg   map[string]string // dialog ID -> last read message ID (sent by us, read by chatmate)
 }
 
 var _ bridgev2.NetworkAPI = (*BoostyClient)(nil)
@@ -52,6 +56,12 @@ func NewBoostyClient(ctx context.Context, bc *BoostyConnector, login *bridgev2.U
 }
 
 func (b *BoostyClient) Connect(ctx context.Context) {
+	b.lifecycleLock.Lock()
+	defer b.lifecycleLock.Unlock()
+	if b.stopPolling != nil {
+		b.stopPolling()
+		b.stopPolling = nil
+	}
 	if !b.client.IsLoggedIn() {
 		b.userLogin.BridgeState.Send(status.BridgeState{
 			StateEvent: status.StateBadCredentials,
@@ -83,6 +93,8 @@ func (b *BoostyClient) Connect(ctx context.Context) {
 }
 
 func (b *BoostyClient) Disconnect() {
+	b.lifecycleLock.Lock()
+	defer b.lifecycleLock.Unlock()
 	if b.stopPolling != nil {
 		b.stopPolling()
 		b.stopPolling = nil
@@ -135,7 +147,7 @@ func (b *BoostyClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Ma
 		return nil, err
 	}
 
-	b.lastSeenMsg[dialogID] = strconv.Itoa(sentMsg.ID)
+	b.setLastSeen(dialogID, strconv.Itoa(sentMsg.ID))
 
 	return &bridgev2.MatrixMessageResponse{
 		DB: &database.Message{
@@ -178,6 +190,13 @@ func (b *BoostyClient) syncDialogs(ctx context.Context) {
 	dialogs, err := b.client.GetDialogs(ctx, 50)
 	if err != nil {
 		log.Err(err).Msg("Failed to fetch dialogs")
+		if errors.Is(err, boosty.ErrInvalidCredentials) {
+			b.userLogin.BridgeState.Send(status.BridgeState{
+				StateEvent: status.StateBadCredentials,
+				Error:      "boosty-auth-failed",
+				Message:    "Boosty rejected the saved credentials. Log in again using the browser login flow.",
+			})
+		}
 		return
 	}
 
@@ -195,7 +214,7 @@ func (b *BoostyClient) syncDialogs(ctx context.Context) {
 		msg := dialog.LastMessage
 		msgIDStr := strconv.Itoa(msg.ID)
 
-		lastSeen, seenBefore := b.lastSeenMsg[dialogIDStr]
+		lastSeen, seenBefore := b.getLastSeen(dialogIDStr)
 		if !seenBefore {
 			chatInfo := b.dialogToChatInfoFromList(&dialog)
 			b.main.Bridge.QueueRemoteEvent(b.userLogin, &simplevent.ChatResync{
@@ -210,7 +229,7 @@ func (b *BoostyClient) syncDialogs(ctx context.Context) {
 				ChatInfo:        chatInfo,
 				LatestMessageTS: msg.CreatedAtTime(),
 			})
-			b.lastSeenMsg[dialogIDStr] = msgIDStr
+			b.setLastSeen(dialogIDStr, msgIDStr)
 			continue
 		}
 
@@ -233,11 +252,9 @@ func (b *BoostyClient) checkAndEmitReadReceipt(dialogID string, dialog *boosty.D
 	}
 
 	msgIDStr := strconv.Itoa(msg.ID)
-	lastRead := b.lastReadMsg[dialogID]
-	if lastRead == msgIDStr {
+	if !b.markReadMessage(dialogID, msgIDStr) {
 		return
 	}
-	b.lastReadMsg[dialogID] = msgIDStr
 
 	chatmateID := networkid.UserID(strconv.Itoa(dialog.Chatmate.ID))
 	b.main.Bridge.QueueRemoteEvent(b.userLogin, &simplevent.Receipt{
@@ -255,38 +272,19 @@ func (b *BoostyClient) checkAndEmitReadReceipt(dialogID string, dialog *boosty.D
 func (b *BoostyClient) fetchAndEmitNewMessages(ctx context.Context, dialogID, lastSeenID string, portalKey networkid.PortalKey) {
 	log := zerolog.Ctx(ctx)
 
-	detail, err := b.client.GetDialog(ctx, dialogID)
+	detail, err := b.client.GetMessageHistory(ctx, dialogID, lastSeenID, true, 20)
 	if err != nil {
 		log.Err(err).Str("dialog_id", dialogID).Msg("Failed to fetch dialog for new messages")
 		return
 	}
 
-	// Boosty API returns messages oldest-first.
-	// Collect messages that appear AFTER lastSeenID in the list.
-	var newMessages []boosty.Message
-	found := false
-	for _, m := range detail.Messages.Data {
-		if strconv.Itoa(m.ID) == lastSeenID {
-			found = true
-			continue
-		}
-		if found {
-			newMessages = append(newMessages, m)
-		}
-	}
-
+	// The directional API drains all pages newer than the last seen ID.
+	newMessages := detail.Messages.Data
 	if len(newMessages) == 0 {
-		if found {
-			return
-		}
-		msgs := detail.Messages.Data
-		if len(msgs) > 0 {
-			b.lastSeenMsg[dialogID] = strconv.Itoa(msgs[len(msgs)-1].ID)
-		}
 		return
 	}
 
-	b.lastSeenMsg[dialogID] = strconv.Itoa(newMessages[len(newMessages)-1].ID)
+	b.setLastSeen(dialogID, strconv.Itoa(newMessages[len(newMessages)-1].ID))
 
 	for _, m := range newMessages {
 		mIDStr := strconv.Itoa(m.ID)
@@ -335,9 +333,7 @@ func (b *BoostyClient) fetchAndEmitNewMessages(ctx context.Context, dialogID, la
 	}
 	if latestReadByMe != nil {
 		readIDStr := strconv.Itoa(latestReadByMe.ID)
-		lastRead := b.lastReadMsg[dialogID]
-		if lastRead != readIDStr {
-			b.lastReadMsg[dialogID] = readIDStr
+		if b.markReadMessage(dialogID, readIDStr) {
 			chatmateID := networkid.UserID(strconv.Itoa(detail.Chatmate.ID))
 			b.main.Bridge.QueueRemoteEvent(b.userLogin, &simplevent.Receipt{
 				EventMeta: simplevent.EventMeta{
@@ -428,4 +424,33 @@ func (b *BoostyClient) wrapAvatar(avatarURL string) *bridgev2.Avatar {
 			return b.client.DownloadAvatar(ctx, avatarURL)
 		},
 	}
+}
+
+// Matrix sends and the poller access these cursors concurrently. Never let an
+// older poll response move a cursor back behind a message just sent in Matrix.
+func (b *BoostyClient) getLastSeen(dialogID string) (string, bool) {
+	b.stateLock.Lock()
+	defer b.stateLock.Unlock()
+	id, ok := b.lastSeenMsg[dialogID]
+	return id, ok
+}
+func (b *BoostyClient) setLastSeen(dialogID, id string) {
+	b.stateLock.Lock()
+	defer b.stateLock.Unlock()
+	previous, _ := strconv.Atoi(b.lastSeenMsg[dialogID])
+	next, _ := strconv.Atoi(id)
+	if next > previous {
+		b.lastSeenMsg[dialogID] = id
+	}
+}
+func (b *BoostyClient) markReadMessage(dialogID, id string) bool {
+	b.stateLock.Lock()
+	defer b.stateLock.Unlock()
+	previous, _ := strconv.Atoi(b.lastReadMsg[dialogID])
+	next, _ := strconv.Atoi(id)
+	if next <= previous {
+		return false
+	}
+	b.lastReadMsg[dialogID] = id
+	return true
 }
