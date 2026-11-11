@@ -66,7 +66,7 @@ docker run -v /path/to/data:/data mautrix-boosty
 
 ## Login
 
-After the bridge is running, start a chat with the bridge bot and use the login command. Choose browser cookie extraction or paste the `auth` cookie JSON from Boosty DevTools. Percent-encoded cookie values are accepted. The `_clientId` cookie can be supplied as the device ID. Access tokens refresh automatically on HTTP 401, and refreshed credentials are saved to the login database. If the refresh token is rejected or revoked, log in again.
+After the bridge is running, start a chat with the bridge bot and use the login command. Choose browser cookie extraction or paste the complete `auth` cookie value from Boosty DevTools. JSON and base64 (standard or URL-safe, with or without padding) are accepted, including percent-encoded values. For manual login, also copy the matching `_clientId` cookie into the device ID field: the bridge otherwise generates an ID that may not work with the saved refresh token. Access tokens refresh automatically on HTTP 401 or an authorization-related HTTP 400, and refreshed credentials are saved to the login database. If the refresh token is rejected or revoked, log in again.
 
 ## Network Configuration
 

@@ -2,10 +2,12 @@ package connector
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"maunium.net/go/mautrix/bridgev2"
@@ -35,8 +37,8 @@ func (bc *BoostyConnector) GetLoginFlows() []bridgev2.LoginFlow {
 			ID:          FlowIDCookies,
 		},
 		{
-			Name:        "Cookie JSON",
-			Description: "Log in by pasting the auth cookie JSON from browser DevTools",
+			Name:        "Auth cookie",
+			Description: "Log in by pasting the auth cookie from browser DevTools (JSON or base64)",
 			ID:          FlowIDCookieJSON,
 		},
 	}
@@ -68,17 +70,18 @@ func (c *CookieJSONLogin) Start(ctx context.Context) (*bridgev2.LoginStep, error
 	return &bridgev2.LoginStep{
 		Type:   bridgev2.LoginStepTypeUserInput,
 		StepID: LoginStepIDCookieJSON,
-		Instructions: "Paste the auth cookie JSON from browser DevTools (Application tab → Cookies → boosty.to → auth). " +
-			"Optionally paste the _clientId cookie value as device ID.",
+		Instructions: "Paste the auth cookie value from browser DevTools (Application tab → Cookies → boosty.to → auth). " +
+			"JSON, base64 and percent-encoded values are accepted. " +
+			"Also paste the matching _clientId cookie as device ID so the bridge can refresh your session.",
 		UserInputParams: &bridgev2.LoginUserInputParams{
 			Fields: []bridgev2.LoginInputDataField{
 				{
 					ID:   "auth_json",
-					Name: "Auth Cookie JSON",
+					Name: "Auth Cookie (JSON or base64)",
 				},
 				{
 					ID:   "device_id",
-					Name: "Device ID (optional, from _clientId cookie)",
+					Name: "Device ID (from matching _clientId cookie)",
 				},
 			},
 		},
@@ -277,9 +280,10 @@ func (c *CookieLogin) SubmitCookies(ctx context.Context, cookies map[string]stri
 	}, nil
 }
 
-// Cookie values copied from DevTools may be percent-encoded. Preserve literal
-// plus signs in tokens: cookies use percent encoding, not form encoding.
+// Accept the complete auth cookie as JSON or base64, optionally percent-encoded.
+// Preserve literal plus signs: cookies do not use form encoding.
 func unmarshalAuthCookie(raw string, out any) error {
+	raw = strings.TrimSpace(raw)
 	if json.Valid([]byte(raw)) {
 		return json.Unmarshal([]byte(raw), out)
 	}
@@ -287,5 +291,17 @@ func unmarshalAuthCookie(raw string, out any) error {
 	if err != nil {
 		return fmt.Errorf("invalid cookie encoding")
 	}
-	return json.Unmarshal([]byte(decoded), out)
+	if json.Valid([]byte(decoded)) {
+		return json.Unmarshal([]byte(decoded), out)
+	}
+	for _, encoding := range []*base64.Encoding{
+		base64.StdEncoding, base64.RawStdEncoding,
+		base64.URLEncoding, base64.RawURLEncoding,
+	} {
+		data, decodeErr := encoding.DecodeString(decoded)
+		if decodeErr == nil && json.Valid(data) {
+			return json.Unmarshal(data, out)
+		}
+	}
+	return fmt.Errorf("expected an auth cookie containing JSON or base64-encoded JSON")
 }
